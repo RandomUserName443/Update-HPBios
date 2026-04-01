@@ -2,57 +2,64 @@
 
 param (
     [Parameter(Mandatory=$True)][string[]]$ComputerName,
-    [string]$SourceDirectory = 'C:\SWSetup\SP136575'
+    [Parameter(Mandatory=$True)][string]$SourceDirectory
 )
 
-#region - Live computers
-Write-Verbose -Message "Computer names input: $ComputerName"
-$liveComputers = @()
-foreach ($computer in $ComputerName) {
-    if (Test-Connection -ComputerName $computer -count 1 -quiet -ErrorAction SilentlyContinue) {
-        $liveComputers += $computer
-        Write-Verbose -Message "$Computer added to list of live hosts."
-    }
-}
-#endregion
+foreach($computer in $ComputerName) {
 
-#region - Copy files to remote computers
-#Note: couldnt figure out how to implement this in the script block due to double-hop issues with permissions to network shares
-foreach($computer in $liveComputers) {
+    # Check if host is online.
+    if (-not (Test-Connection -ComputerName $computer -count 1 -quiet -ErrorAction SilentlyContinue)) {
+        Write-verbose -Message "$Computer offline. Skipping to next host."
+        continue
+    }
+    # Check and remove old BiosUpdate folder on target host.
     if (test-path -path "\\$Computer\C$\SWSetup\BiosUpdate") {
         remove-Item -Recurse -Force -path "\\$Computer\C$\SWSetup\BiosUpdate"
+        Write-Verbose -Message "$Computer - Removed old files."
     }
+    # Copy items to target machine's local drive.
     Copy-Item -Recurse -Force -Path "$SourceDirectory" -Destination "\\$Computer\C$\SWSetup\BiosUpdate"
     Write-Verbose -Message "$Computer - Copied files."
+
+    # Establish PowerShell session with target host.
+    try {
+        $session = New-PSSession -ComputerName $computer
+    } catch {
+        write-verbose -message "Error establishing PowerShell session with $computer. Skipping to next host."
+        continue
+    }
+
+    # TODO - Device model and BIOS version checks.
+
+    # Run HP Firmware Update executable.
+    Invoke-Command -Session $session -ScriptBlock {
+        start-process -filepath "C:\SWSetup\BiosUpdate\HPFirmwareUpdRec64.exe" `
+                      -ArgumentList "-s","-pC:\SWSetup\BiosUpdate\pass.key","-fC:\SWSetup\BiosUpdate","-b","-r" `
+                      -Wait
+    } 
+    Write-Verbose -Message "$Computer - BIOS update complete. Cleaning up session."
+    
+    # Close PowerShell session.
+    $session | Remove-PSSession
 }
-#endregion
 
-
-$ScriptBlock = {
-    $VerbosePreference='Continue'
-
-    #region - Registry fix????
-    $RegistryPath = 'HKLM:\Software\Microsoft\Cryptography\Protect\Providers\df9d8cd0-1501-11d1-8c7a-00c04fc297eb'
-    Get-Item -Path $RegistryPath | New-ItemProperty -Name ProtectionPolicy -Value 1 -PropertyType dword
-    #endregion
-
-    $Command = "C:\SWSetup\BiosUpdate\HPFirmwareUpdRec64.exe -s -pPassword.key -fC:\SWSetup\BiosUpdate -r -b"
-    write-Verbose -message "Command: $Command"
-    Invoke-Expression -command $Command -Verbose
-    start-sleep -seconds 20  
-
-}
-
-Invoke-Command -ComputerName $liveComputers -ScriptBlock $ScriptBlock -ThrottleLimit 1
-# & .\HpqPswd64.exe /f"c:\Password.key" /p"passwordhere" /s
 
 
 
 # NOTES
-# Using the HP Bios Setup Password (HpqPswd64.exe), create a password file. Set working directory to the extracted
-# directory before executing the command. It will create the Password.key file in the same directory.
-# Example: & .\HpqPswd64.exe /f"Password.key" /p"passwordhere" /s
+# & .\HpqPswd64.exe /f"Password.key" /p"passwordhere" /s
+# Must be ran as admin and not while remoted into another machine; double hop issues if you do.
 
+#region - Live computers
+# Write-Verbose -Message "Computer names input: $ComputerName"
+# $liveComputers = @()
+# foreach ($computer in $ComputerName) {
+#     if (Test-Connection -ComputerName $computer -count 1 -quiet -ErrorAction SilentlyContinue) {
+#         $liveComputers += $computer
+#         Write-Verbose -Message "$Computer added to list of live hosts."
+#     }
+# }
+#endregion
 
 # REFERENCES
 # HP Download Library: https://www.hp.com/us-en/solutions/client-management-solutions/download.html
